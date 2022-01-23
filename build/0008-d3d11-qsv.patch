@@ -1,0 +1,75 @@
+From 46c6946eeea8bb213c4f9b5b1f1aecfdfab5454e Mon Sep 17 00:00:00 2001
+From: Artem Galin <artem.galin@intel.com>
+Date: Fri, 20 Aug 2021 22:48:08 +0100
+Subject: [PATCH] libavfilter/vf_scale_qsv: enabling d3d11va support, added
+ mfxhdlpair
+
+Adding DX11 relevant device type checks and adjusting callback with
+proper MediaSDK pair type support.
+
+Signed-off-by: Artem Galin <artem.galin@intel.com>
+---
+ libavfilter/vf_scale_qsv.c | 31 ++++++++++++++++++-------------
+ 1 file changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/libavfilter/vf_scale_qsv.c b/libavfilter/vf_scale_qsv.c
+index 2c9f8e153bc0..fe8ed374183e 100644
+--- a/libavfilter/vf_scale_qsv.c
++++ b/libavfilter/vf_scale_qsv.c
+@@ -70,6 +70,7 @@ enum var_name {
+ };
+ 
+ #define QSV_HAVE_SCALING_CONFIG  QSV_VERSION_ATLEAST(1, 19)
++#define MFX_IMPL_VIA_MASK(impl) (0x0f00 & (impl))
+ 
+ typedef struct QSVScaleContext {
+     const AVClass *class;
+@@ -259,16 +260,16 @@ static mfxStatus frame_unlock(mfxHDL pthis, mfxMemId mid, mfxFrameData *ptr)
+ 
+ static mfxStatus frame_get_hdl(mfxHDL pthis, mfxMemId mid, mfxHDL *hdl)
+ {
+-    *hdl = mid;
++    mfxHDLPair *pair_dst = (mfxHDLPair*)hdl;
++    mfxHDLPair *pair_src = (mfxHDLPair*)mid;
++
++    pair_dst->first = pair_src->first;
++
++    if (pair_src->second != (mfxMemId)MFX_INFINITE)
++        pair_dst->second = pair_src->second;
+     return MFX_ERR_NONE;
+ }
+ 
+-static const mfxHandleType handle_types[] = {
+-    MFX_HANDLE_VA_DISPLAY,
+-    MFX_HANDLE_D3D9_DEVICE_MANAGER,
+-    MFX_HANDLE_D3D11_DEVICE,
+-};
+-
+ static int init_out_session(AVFilterContext *ctx)
+ {
+ 
+@@ -300,14 +301,18 @@ static int init_out_session(AVFilterContext *ctx)
+         return AVERROR_UNKNOWN;
+     }
+ 
+-    for (i = 0; i < FF_ARRAY_ELEMS(handle_types); i++) {
+-        err = MFXVideoCORE_GetHandle(device_hwctx->session, handle_types[i], &handle);
+-        if (err == MFX_ERR_NONE) {
+-            handle_type = handle_types[i];
+-            break;
+-        }
++    if (MFX_IMPL_VIA_VAAPI == MFX_IMPL_VIA_MASK(impl)) {
++        handle_type = MFX_HANDLE_VA_DISPLAY;
++    } else if (MFX_IMPL_VIA_D3D11 == MFX_IMPL_VIA_MASK(impl)) {
++        handle_type = MFX_HANDLE_D3D11_DEVICE;
++    } else if (MFX_IMPL_VIA_D3D9 == MFX_IMPL_VIA_MASK(impl)) {
++        handle_type = MFX_HANDLE_D3D9_DEVICE_MANAGER;
++    } else {
++        av_log(ctx, AV_LOG_ERROR, "Error unsupported handle type\n");
++        return AVERROR_UNKNOWN;
+     }
+ 
++    err = MFXVideoCORE_GetHandle(device_hwctx->session, handle_type, &handle);
+     if (err < 0)
+         return ff_qsvvpp_print_error(ctx, err, "Error getting the session handle");
+     else if (err > 0) {

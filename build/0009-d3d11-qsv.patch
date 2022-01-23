@@ -1,0 +1,26 @@
+From c1cebaa4c495666ecd27f0dfe7f175e2f0185f7a Mon Sep 17 00:00:00 2001
+From: Artem Galin <artem.galin@intel.com>
+Date: Fri, 20 Aug 2021 22:48:09 +0100
+Subject: [PATCH] libavfilter/vf_scale_qsv: add MFX_MEMTYPE_FROM_VPPOUT flag to
+ frame_type
+
+In case of DX11 device type, Media SDK is sensitive to these flags.
+
+Signed-off-by: Artem Galin <artem.galin@intel.com>
+---
+ libavfilter/vf_scale_qsv.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libavfilter/vf_scale_qsv.c b/libavfilter/vf_scale_qsv.c
+index fe8ed374183e..2ab04457a91a 100644
+--- a/libavfilter/vf_scale_qsv.c
++++ b/libavfilter/vf_scale_qsv.c
+@@ -202,7 +202,7 @@ static int init_out_pool(AVFilterContext *ctx,
+     out_frames_ctx->sw_format         = out_format;
+     out_frames_ctx->initial_pool_size = 4;
+ 
+-    out_frames_hwctx->frame_type = in_frames_hwctx->frame_type;
++    out_frames_hwctx->frame_type = in_frames_hwctx->frame_type | MFX_MEMTYPE_FROM_VPPOUT;
+ 
+     ret = ff_filter_init_hw_frames(ctx, outlink, 32);
+     if (ret < 0)

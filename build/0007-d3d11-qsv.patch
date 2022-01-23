@@ -1,0 +1,26 @@
+From 36166cc304975918da201de48987e9e898ae8021 Mon Sep 17 00:00:00 2001
+From: Artem Galin <artem.galin@intel.com>
+Date: Fri, 20 Aug 2021 22:48:07 +0100
+Subject: [PATCH] libavfilter/qsvvpp: add MFX_MEMTYPE_FROM_VPPOUT flag to
+ output frames
+
+In case of DX11 device type, Media SDK is sensitive to these flags.
+
+Signed-off-by: Artem Galin <artem.galin@intel.com>
+---
+ libavfilter/qsvvpp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libavfilter/qsvvpp.c b/libavfilter/qsvvpp.c
+index 66b8673d4e53..135d4c4e3695 100644
+--- a/libavfilter/qsvvpp.c
++++ b/libavfilter/qsvvpp.c
+@@ -527,7 +527,7 @@ static int init_vpp_session(AVFilterContext *avctx, QSVVPPContext *s)
+ 
+         s->out_mem_mode = IS_OPAQUE_MEMORY(s->in_mem_mode) ?
+                           MFX_MEMTYPE_OPAQUE_FRAME :
+-                          MFX_MEMTYPE_VIDEO_MEMORY_DECODER_TARGET;
++                          MFX_MEMTYPE_VIDEO_MEMORY_DECODER_TARGET | MFX_MEMTYPE_FROM_VPPOUT;
+ 
+         out_frames_ctx   = (AVHWFramesContext *)out_frames_ref->data;
+         out_frames_hwctx = out_frames_ctx->hwctx;

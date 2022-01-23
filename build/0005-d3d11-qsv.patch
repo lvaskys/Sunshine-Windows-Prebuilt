@@ -1,0 +1,238 @@
+From 4f78711f9c28b11dae4e4b96be46b6b4925eb8c6 Mon Sep 17 00:00:00 2001
+From: Artem Galin <artem.galin@intel.com>
+Date: Fri, 20 Aug 2021 22:48:05 +0100
+Subject: [PATCH] libavutil/hwcontext_d3d11va: adding more texture information
+ to the D3D11 hwcontext API
+
+Microsoft VideoProcessor requires texture with D3DUSAGE_RENDERTARGET flag as output.
+There is no way to allocate array of textures with D3D11_BIND_RENDER_TARGET flag
+and .ArraySize > 2 by ID3D11Device_CreateTexture2D due to the Microsoft limitation.
+Adding AVD3D11FrameDescriptors array to store array of single textures
+instead of texture with multiple slices resolves this.
+
+Signed-off-by: Artem Galin <artem.galin@intel.com>
+---
+ doc/APIchanges                |  3 +++
+ libavutil/hwcontext_d3d11va.c | 24 ++++++++++++++++++-----
+ libavutil/hwcontext_d3d11va.h |  9 +++++++++
+ libavutil/hwcontext_qsv.c     | 37 +++++++++++++++++++++++------------
+ libavutil/version.h           |  4 ++--
+ 5 files changed, 58 insertions(+), 19 deletions(-)
+
+diff --git a/doc/APIchanges b/doc/APIchanges
+index 7a9aabc98e95..d03e3233ba03 100644
+--- a/doc/APIchanges
++++ b/doc/APIchanges
+@@ -14,6 +14,9 @@ libavutil:     2021-04-27
+ 
+ API changes, most recent first:
+ 
++2021-09-08 - xxxxxxxxxx - lavu 57.5.100 - hwcontext_d3d11va.h
++  Add AVD3D11VAFramesContext.texture_infos
++
+ 2021-09-06 - xxxxxxxxxx - lsws 6.1.100 - swscale.h
+   Add AVFrame-based scaling API:
+     - sws_scale_frame()
+diff --git a/libavutil/hwcontext_d3d11va.c b/libavutil/hwcontext_d3d11va.c
+index 27274ee3fa1e..272a19da47e1 100644
+--- a/libavutil/hwcontext_d3d11va.c
++++ b/libavutil/hwcontext_d3d11va.c
+@@ -72,6 +72,7 @@ static av_cold void load_functions(void)
+ }
+ 
+ typedef struct D3D11VAFramesContext {
++    int nb_surfaces;
+     int nb_surfaces_used;
+ 
+     DXGI_FORMAT format;
+@@ -112,6 +113,8 @@ static void d3d11va_frames_uninit(AVHWFramesContext *ctx)
+     if (s->staging_texture)
+         ID3D11Texture2D_Release(s->staging_texture);
+     s->staging_texture = NULL;
++
++    av_freep(&frames_hwctx->texture_infos);
+ }
+ 
+ static int d3d11va_frames_get_constraints(AVHWDeviceContext *ctx,
+@@ -152,15 +155,21 @@ static void free_texture(void *opaque, uint8_t *data)
+     av_free(data);
+ }
+ 
+-static AVBufferRef *wrap_texture_buf(ID3D11Texture2D *tex, int index)
++static AVBufferRef *wrap_texture_buf(AVHWFramesContext *ctx, ID3D11Texture2D *tex, int index)
+ {
+     AVBufferRef *buf;
+-    AVD3D11FrameDescriptor *desc = av_mallocz(sizeof(*desc));
++    AVD3D11FrameDescriptor         *desc = av_mallocz(sizeof(*desc));
++    D3D11VAFramesContext              *s = ctx->internal->priv;
++    AVD3D11VAFramesContext *frames_hwctx = ctx->hwctx;
+     if (!desc) {
+         ID3D11Texture2D_Release(tex);
+         return NULL;
+     }
+ 
++    frames_hwctx->texture_infos[s->nb_surfaces_used].texture = tex;
++    frames_hwctx->texture_infos[s->nb_surfaces_used].index = index;
++    s->nb_surfaces_used++;
++
+     desc->texture = tex;
+     desc->index   = index;
+ 
+@@ -199,7 +208,7 @@ static AVBufferRef *d3d11va_alloc_single(AVHWFramesContext *ctx)
+         return NULL;
+     }
+ 
+-    return wrap_texture_buf(tex, 0);
++    return wrap_texture_buf(ctx, tex, 0);
+ }
+ 
+ static AVBufferRef *d3d11va_pool_alloc(void *opaque, size_t size)
+@@ -220,7 +229,7 @@ static AVBufferRef *d3d11va_pool_alloc(void *opaque, size_t size)
+     }
+ 
+     ID3D11Texture2D_AddRef(hwctx->texture);
+-    return wrap_texture_buf(hwctx->texture, s->nb_surfaces_used++);
++    return wrap_texture_buf(ctx, hwctx->texture, s->nb_surfaces_used);
+ }
+ 
+ static int d3d11va_frames_init(AVHWFramesContext *ctx)
+@@ -267,7 +276,7 @@ static int d3d11va_frames_init(AVHWFramesContext *ctx)
+             av_log(ctx, AV_LOG_ERROR, "User-provided texture has mismatching parameters\n");
+             return AVERROR(EINVAL);
+         }
+-    } else if (texDesc.ArraySize > 0) {
++    } else if (!(texDesc.BindFlags & D3D11_BIND_RENDER_TARGET) && texDesc.ArraySize > 0) {
+         hr = ID3D11Device_CreateTexture2D(device_hwctx->device, &texDesc, NULL, &hwctx->texture);
+         if (FAILED(hr)) {
+             av_log(ctx, AV_LOG_ERROR, "Could not create the texture (%lx)\n", (long)hr);
+@@ -275,6 +284,11 @@ static int d3d11va_frames_init(AVHWFramesContext *ctx)
+         }
+     }
+ 
++    hwctx->texture_infos = av_mallocz_array(ctx->initial_pool_size, sizeof(*hwctx->texture_infos));
++    if (!hwctx->texture_infos)
++        return AVERROR(ENOMEM);
++    s->nb_surfaces = ctx->initial_pool_size;
++
+     ctx->internal->pool_internal = av_buffer_pool_init2(sizeof(AVD3D11FrameDescriptor),
+                                                         ctx, d3d11va_pool_alloc, NULL);
+     if (!ctx->internal->pool_internal)
+diff --git a/libavutil/hwcontext_d3d11va.h b/libavutil/hwcontext_d3d11va.h
+index 9f91e9b1b67b..77d2d72f1b91 100644
+--- a/libavutil/hwcontext_d3d11va.h
++++ b/libavutil/hwcontext_d3d11va.h
+@@ -164,6 +164,15 @@ typedef struct AVD3D11VAFramesContext {
+      * This field is ignored/invalid if a user-allocated texture is provided.
+      */
+     UINT MiscFlags;
++
++    /**
++     * In case if texture structure member above is not NULL contains the same texture
++     * pointer for all elements and different indexes into the array texture.
++     * In case if texture structure member above is NULL, all elements contains
++     * pointers to separate non-array textures and 0 indexes.
++     * This field is ignored/invalid if a user-allocated texture is provided.
++    */
++    AVD3D11FrameDescriptor *texture_infos;
+ } AVD3D11VAFramesContext;
+ 
+ #endif /* AVUTIL_HWCONTEXT_D3D11VA_H */
+diff --git a/libavutil/hwcontext_qsv.c b/libavutil/hwcontext_qsv.c
+index 77b540fef928..d431e71eab3c 100644
+--- a/libavutil/hwcontext_qsv.c
++++ b/libavutil/hwcontext_qsv.c
+@@ -120,6 +120,23 @@ static uint32_t qsv_fourcc_from_pix_fmt(enum AVPixelFormat pix_fmt)
+     return 0;
+ }
+ 
++#if CONFIG_D3D11VA
++static uint32_t qsv_get_d3d11va_bind_flags(int mem_type)
++{
++    uint32_t bind_flags = 0;
++
++    if ((mem_type & MFX_MEMTYPE_VIDEO_MEMORY_ENCODER_TARGET) && (mem_type & MFX_MEMTYPE_INTERNAL_FRAME))
++        bind_flags = D3D11_BIND_DECODER | D3D11_BIND_VIDEO_ENCODER;
++    else
++        bind_flags = D3D11_BIND_DECODER;
++
++    if ((MFX_MEMTYPE_FROM_VPPOUT & mem_type) || (MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET & mem_type))
++        bind_flags = D3D11_BIND_RENDER_TARGET;
++
++    return bind_flags;
++}
++#endif
++
+ static int qsv_device_init(AVHWDeviceContext *ctx)
+ {
+     AVQSVDeviceContext *hwctx = ctx->hwctx;
+@@ -295,12 +312,11 @@ static int qsv_init_child_ctx(AVHWFramesContext *ctx)
+ #if CONFIG_D3D11VA
+     if (child_device_ctx->type == AV_HWDEVICE_TYPE_D3D11VA) {
+         AVD3D11VAFramesContext *child_frames_hwctx = child_frames_ctx->hwctx;
+-        if (hwctx->frame_type & MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET)
+-            child_frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET;
+-        else
+-            child_frames_hwctx->BindFlags = D3D11_BIND_DECODER;
++        if (hwctx->frame_type == 0)
++            hwctx->frame_type = MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET;
+         if (hwctx->frame_type & MFX_MEMTYPE_SHARED_RESOURCE)
+             child_frames_hwctx->MiscFlags = D3D11_RESOURCE_MISC_SHARED;
++        child_frames_hwctx->BindFlags = qsv_get_d3d11va_bind_flags(hwctx->frame_type);
+     }
+ #endif
+ #if CONFIG_DXVA2
+@@ -334,11 +350,11 @@ static int qsv_init_child_ctx(AVHWFramesContext *ctx)
+     if (child_device_ctx->type == AV_HWDEVICE_TYPE_D3D11VA) {
+         AVD3D11VAFramesContext *child_frames_hwctx = child_frames_ctx->hwctx;
+         for (i = 0; i < ctx->initial_pool_size; i++) {
+-            s->handle_pairs_internal[i].first = (mfxMemId)child_frames_hwctx->texture;
++            s->handle_pairs_internal[i].first = (mfxMemId)child_frames_hwctx->texture_infos[i].texture;
+             if(child_frames_hwctx->BindFlags & D3D11_BIND_RENDER_TARGET) {
+                 s->handle_pairs_internal[i].second = (mfxMemId)MFX_INFINITE;
+             } else {
+-                s->handle_pairs_internal[i].second = (mfxMemId)i;
++                s->handle_pairs_internal[i].second = (mfxMemId)child_frames_hwctx->texture_infos[i].index;
+             }
+             s->surfaces_internal[i].Data.MemId = (mfxMemId)&s->handle_pairs_internal[i];
+         }
+@@ -714,10 +730,7 @@ static int qsv_frames_derive_from(AVHWFramesContext *dst_ctx,
+             dst_hwctx->texture = (ID3D11Texture2D*)pair->first;
+             if (src_hwctx->frame_type & MFX_MEMTYPE_SHARED_RESOURCE)
+                 dst_hwctx->MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+-            if (src_hwctx->frame_type == MFX_MEMTYPE_VIDEO_MEMORY_DECODER_TARGET)
+-                dst_hwctx->BindFlags = D3D11_BIND_DECODER;
+-            else
+-                dst_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET;
++            dst_hwctx->BindFlags = qsv_get_d3d11va_bind_flags(src_hwctx->frame_type);
+         }
+         break;
+ #endif
+@@ -1137,11 +1150,11 @@ static int qsv_frames_derive_to(AVHWFramesContext *dst_ctx,
+                 return AVERROR(ENOMEM);
+             for (i = 0; i < src_ctx->initial_pool_size; i++) {
+                 qsv_init_surface(dst_ctx, &s->surfaces_internal[i]);
+-                s->handle_pairs_internal[i].first = (mfxMemId)src_hwctx->texture;
++                s->handle_pairs_internal[i].first = (mfxMemId)src_hwctx->texture_infos[i].texture;
+                 if (src_hwctx->BindFlags & D3D11_BIND_RENDER_TARGET) {
+                     s->handle_pairs_internal[i].second = (mfxMemId)MFX_INFINITE;
+                 } else {
+-                    s->handle_pairs_internal[i].second = (mfxMemId)i;
++                    s->handle_pairs_internal[i].second = (mfxMemId)src_hwctx->texture_infos[i].index;
+                 }
+                 s->surfaces_internal[i].Data.MemId = (mfxMemId)&s->handle_pairs_internal[i];
+             }
+diff --git a/libavutil/version.h b/libavutil/version.h
+index 4b77387b08a6..f220e192c8bf 100644
+--- a/libavutil/version.h
++++ b/libavutil/version.h
+@@ -79,8 +79,8 @@
+  */
+ 
+ #define LIBAVUTIL_VERSION_MAJOR  57
+-#define LIBAVUTIL_VERSION_MINOR   4
+-#define LIBAVUTIL_VERSION_MICRO 101
++#define LIBAVUTIL_VERSION_MINOR   5
++#define LIBAVUTIL_VERSION_MICRO 100
+ 
+ #define LIBAVUTIL_VERSION_INT   AV_VERSION_INT(LIBAVUTIL_VERSION_MAJOR, \
+                                                LIBAVUTIL_VERSION_MINOR, \
